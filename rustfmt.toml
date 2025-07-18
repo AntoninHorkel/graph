@@ -1,0 +1,21 @@
+# https://rust-lang.github.io/rustfmt/
+comment_width = 120
+edition = "2024"
+format_code_in_doc_comments = true
+fn_single_line = false
+group_imports = "StdExternalCrate"
+hard_tabs = false
+imports_granularity = "Crate"
+imports_layout = "HorizontalVertical"
+max_width = 120
+newline_style = "Unix"
+normalize_comments = true
+overflow_delimited_expr = true
+reorder_impl_items = true
+reorder_modules = true
+struct_lit_single_line = false
+style_edition = "2024"
+tab_spaces = 4
+unstable_features = true
+use_small_heuristics = "Max"
+# wrap_comments = true # TODO: This breaks commented out code!
