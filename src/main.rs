@@ -1,5 +1,3 @@
-#![feature(duration_millis_float)]
-
 use std::{
     io,
     io::Error as IoError,
@@ -301,7 +299,7 @@ impl WgpuState {
         self.instance.queue.write_buffer(
             &self.resources.uniform_buffer,
             0,
-            &self.instant.elapsed().as_millis_f32().to_ne_bytes(),
+            &self.instant.elapsed().as_secs_f32().to_ne_bytes(),
         );
         let mut command_encoder = self.instance.device.create_command_encoder(&CommandEncoderDescriptor {
             label: None,
