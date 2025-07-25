@@ -37,11 +37,14 @@ codegen-units = 1 # This supposedly enables more optimizations.
 rpath = false
 
 [dependencies]
+bytemuck = "1.23.1"
 crossterm = "0.29.0"
 image = "0.25.6"
 pollster = "0.4.0"
 ratatui = "0.29.0"
 ratatui-image = "8.0.1"
+seq-macro = "0.3.6"
+smallvec = { version = "1.15.1", features = ["union", "const_generics"] }
 thiserror = "2.0.12"
 tracy-client = "=0.18.0" # For Tracy v0.11.1 (https://github.com/nagisa/rust_tracy_client#version-support-table)
 wgpu = { version = "26.0.1", default-features = false, features = ["metal", "vulkan", "webgl", "webgpu", "wgsl"] }

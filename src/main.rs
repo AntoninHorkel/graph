@@ -1,18 +1,21 @@
 use std::{
+    hint,
     io,
     io::Error as IoError,
     panic,
     time::{Duration, Instant},
 };
 
+use bytemuck::{Pod, Zeroable};
 use crossterm::{
     event,
     event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers},
 };
 use image::{DynamicImage, RgbaImage};
 use ratatui::Frame;
-use ratatui_image::{Resize, StatefulImage, errors::Errors as ImageError, picker::Picker};
-// use ratatui_image::protocol::StatefulProtocol;
+use ratatui_image::{Image, Resize, errors::Errors as ImageError, picker::Picker};
+// use ratatui_image::{StatefulImage, protocol::StatefulProtocol};
+use smallvec::SmallVec;
 use thiserror::Error;
 use tracy_client::{Client as TracyClient, frame_mark, span};
 use wgpu::{
@@ -92,6 +95,21 @@ enum ThisError {
 
 type ThisResult<T> = Result<T, ThisError>;
 
+#[derive(Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+struct UniformBufferObject {
+    time: f32,
+}
+
+// #[derive(Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+struct StorageBufferObject {
+    nodes_length: u32,
+    edges_length: u32,
+    nodes: SmallVec<[u32; 4096]>,
+    edges: SmallVec<[u32; 4096]>,
+}
+
 #[derive(Clone, Copy)]
 struct Size {
     width: u32,
@@ -103,11 +121,12 @@ struct WgpuInstance {
     queue: Queue,
     bind_group_layout: BindGroupLayout,
     pipeline: ComputePipeline,
+    uniform_buffer: Buffer,
+    storage_buffer: Buffer,
 }
 
 struct WgpuResources {
     texture: Texture,
-    uniform_buffer: Buffer,
     bind_group: BindGroup,
     buffer_bytes_per_row: u32,
     buffer: Buffer,
@@ -160,7 +179,19 @@ impl WgpuInstance {
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: BufferSize::new(size_of::<f32>() as u64),
+                        min_binding_size: BufferSize::new(size_of::<UniformBufferObject>() as u64),
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage {
+                            read_only: false,
+                        },
+                        has_dynamic_offset: false,
+                        min_binding_size: None, // BufferSize::new(size_of::<StorageBufferObject>() as u64),
                     },
                     count: None,
                 },
@@ -194,11 +225,25 @@ impl WgpuInstance {
             },
             cache: maybe_pipeline_cache,
         });
+        let uniform_buffer = device.create_buffer(&BufferDescriptor {
+            label: None,
+            size: size_of::<UniformBufferObject>() as u64,
+            usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+        let storage_buffer = device.create_buffer(&BufferDescriptor {
+            label: None,
+            size: size_of::<StorageBufferObject>() as u64,
+            usage: BufferUsages::COPY_DST | BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
         Ok(Self {
             device,
             queue,
             bind_group_layout,
             pipeline,
+            uniform_buffer,
+            storage_buffer,
         })
     }
 
@@ -228,12 +273,6 @@ impl WgpuInstance {
             base_array_layer: 0,
             array_layer_count: None,
         });
-        let uniform_buffer = self.device.create_buffer(&BufferDescriptor {
-            label: None,
-            size: size_of::<f32>() as u64,
-            usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM, // TODO
-            mapped_at_creation: false,
-        });
         let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
             label: None,
             layout: &self.bind_group_layout,
@@ -244,7 +283,7 @@ impl WgpuInstance {
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: uniform_buffer.as_entire_binding(),
+                    resource: self.uniform_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -257,7 +296,6 @@ impl WgpuInstance {
         });
         WgpuResources {
             texture,
-            uniform_buffer,
             bind_group,
             buffer_bytes_per_row,
             buffer,
@@ -291,15 +329,17 @@ impl WgpuState {
         self.resources = self.instance.resources(size);
     }
 
-    pub fn draw_with<F>(&self, function: F) -> ThisResult<()>
+    pub fn draw_with<F>(&self, callback: F) -> ThisResult<()>
     where
-        F: FnOnce(DynamicImage) -> ThisResult<()>, // TODO: Reference?
+        F: FnOnce(DynamicImage) -> ThisResult<()>,
     {
         let _zone = span!("WGPU draw");
         self.instance.queue.write_buffer(
-            &self.resources.uniform_buffer,
+            &self.instance.uniform_buffer,
             0,
-            &self.instant.elapsed().as_secs_f32().to_ne_bytes(),
+            bytemuck::cast_slice(&[UniformBufferObject {
+                time: self.instant.elapsed().as_secs_f32(),
+            }]),
         );
         let mut command_encoder = self.instance.device.create_command_encoder(&CommandEncoderDescriptor {
             label: None,
@@ -346,7 +386,7 @@ impl WgpuState {
         let _zone = span!("WGPU draw: unmap");
         self.resources.buffer.unmap();
         let _zone = span!("WGPU draw: callback");
-        (function)(RgbaImage::from_raw(self.size.width, self.size.height, pixels).ok_or(ThisError::ImageGen)?.into())
+        callback(RgbaImage::from_raw(self.size.width, self.size.height, pixels).ok_or(ThisError::ImageGen)?.into())
     }
 }
 
@@ -360,9 +400,10 @@ impl App {
     fn new(size: Size) -> ThisResult<Self> {
         let _zone = span!("App state init");
         let picker = Picker::from_query_stdio()?;
+        let font_size = picker.font_size();
         let size = Size {
-            width: size.width * u32::from(picker.font_size().0),
-            height: size.height * u32::from(picker.font_size().1),
+            width: size.width * u32::from(font_size.0),
+            height: size.height * u32::from(font_size.1),
         };
         let wgpu_state = WgpuState::new(size)?;
         Ok(Self {
@@ -373,21 +414,26 @@ impl App {
 
     #[inline]
     fn resize(&mut self, size: Size) {
+        let font_size = self.picker.font_size();
         let size = Size {
-            width: size.width * u32::from(self.picker.font_size().0),
-            height: size.height * u32::from(self.picker.font_size().1),
+            width: size.width * u32::from(font_size.0),
+            height: size.height * u32::from(font_size.1),
         };
         self.wgpu_state.resize(size);
     }
 
     fn draw(&self, frame: &mut Frame<'_>) -> ThisResult<()> {
         self.wgpu_state.draw_with(|image| {
-            let mut image = self.picker.new_resize_protocol(image);
-            frame.render_stateful_widget(
-                // TODO: https://docs.rs/ratatui-image/8.0.1/ratatui_image/enum.FilterType.html selection or maybe sampling using a shader?
-                StatefulImage::new().resize(Resize::Scale(None)),
+            // let mut image = self.picker.new_resize_protocol(image);
+            // frame.render_stateful_widget(
+            //     // TODO: https://docs.rs/ratatui-image/8.0.1/ratatui_image/enum.FilterType.html selection or maybe sampling using a shader?
+            //     StatefulImage::new().resize(Resize::Scale(None)),
+            //     frame.area(),
+            //     &mut image,
+            // );
+            frame.render_widget(
+                Image::new(&self.picker.new_protocol(image, frame.area(), Resize::Scale(None))?),
                 frame.area(),
-                &mut image,
             );
             Ok(())
         })
@@ -412,6 +458,7 @@ fn main() {
     .expect("Failed to initialize app");
     let mut timeout = Duration::from_millis(16);
     'main: loop {
+        hint::spin_loop();
         let tick = Instant::now();
         while event::poll(Duration::from_millis(16).saturating_sub(timeout)).expect("Failed to poll event") {
             match event::read().expect("Failed to read event") {
@@ -443,3 +490,5 @@ fn main() {
     crossterm::execute!(stdout, DisableMouseCapture).expect("Failed to disable mouse capture");
     ratatui::restore();
 }
+
+mod markdown; // TODO

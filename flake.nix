@@ -1,3 +1,5 @@
+# TODO: Add fuzzing support (https://rust-fuzz.github.io/book/).
+# TODO: home-manager module.
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -26,6 +28,7 @@
       crane,
       rust-overlay,
       advisory-db,
+      ...
     }:
     # TODO: Specify systems.
     flake-utils.lib.eachDefaultSystem (
